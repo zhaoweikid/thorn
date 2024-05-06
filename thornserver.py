@@ -5,7 +5,6 @@ import socket
 import time
 import traceback
 import config
-import gevent
 from errno import EAGAIN, EBADF, EPIPE, ECONNRESET
 import logging
 import asyncio
