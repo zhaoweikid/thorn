@@ -6,7 +6,6 @@ import time
 import traceback
 from asyncio import exceptions
 import config
-import gevent
 from errno import EAGAIN, EBADF, EPIPE, ECONNRESET
 import logging
 import asyncio
