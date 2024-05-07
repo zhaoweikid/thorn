@@ -1,28 +1,41 @@
 # coding: utf-8
 import os, sys
 import struct
+import time
 
-CMD_SEND = 1
-CMD_CLOSE = 2
+CMD_PING = 1
+CMD_PONG = 2 
+CMD_SEND = 10 
+CMD_CLOSE = 3
 
-
-headlen = 9
+headtypes = 'IIB'
+headlen = struct.calcsize(headtypes)
 
 def pack(name, cmd, data):
     # length(4B) + name(4B) + command(1B)
-    return struct.pack('IIB', len(data), int(name), cmd) + data
+    return struct.pack(headtypes, len(data), int(name), cmd) + data
 
 def pack_head(name, cmd, datalen):
-    return struct.pack('IIB', datalen, int(name), cmd)
+    return struct.pack(headtypes, datalen, int(name), cmd)
 
 def unpack_head(rawdata):
-    return struct.unpack('IIB', rawdata)
+    return struct.unpack(headtypes, rawdata)
 
 def auth(user, byte=False):
     s = 'AUTH {}\r\n'.format(user)
     if byte:
         return s.encode('utf-8')
     return s
+
+def cmd_ping(name):
+    data = '{}'.format(int(time.time()))
+    return pack_head(name, CMD_PING, data)
+
+def cmd_pong(name, data):
+    return pack(name, CMD_PONG, data)
+
+def cmd_close(name):
+    return pack_head(name, CMD_CLOSE, 0)
 
 def ok(byte=False):
     if byte:

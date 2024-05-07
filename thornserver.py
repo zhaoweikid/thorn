@@ -47,7 +47,8 @@ async def from_thornclient(th_r, th_w, port):
                 closeall()
                 break
             length, name, cmd = proto.unpack_head(head)
-            
+
+           
             if length <= 0:
                 log.info('length error, thorn close, quit')
                 closeall()
@@ -55,6 +56,14 @@ async def from_thornclient(th_r, th_w, port):
 
             data = await th_r.readexactly(length)
             log.debug('thorn %d >>> %d', fd, len(data))
+
+            if cmd == proto.CMD_PING:
+                th_w.write(proto.cmd_pong(name))
+                await th_w.drain()
+                continue
+            elif cmd == proto.CMD_PONG:
+                continue
+ 
            
             cli = item['clients'].get(name)
             if not cli:
@@ -83,7 +92,7 @@ async def to_thornclient(cli_r, cli_w, th_w, sn):
     try:
         while True:
             data = await cli_r.read(8192*2)
-            log.debug('client %d >>> %d', cli_w._transport._sock_fd, len(data))        
+            log.debug('client %d >>> %d', sn, len(data))        
             if not data:
                 log.info('read 0, client conn close, quit')
                 #if not th_w.is_closing():
@@ -93,7 +102,7 @@ async def to_thornclient(cli_r, cli_w, th_w, sn):
                     await cli_w.wait_closed()
                 break
             packdata = proto.pack(sn, proto.CMD_SEND, data)
-            log.debug('thorn %d <<< %d', th_w._transport._sock_fd, len(packdata))
+            log.debug('thorn %d <<< %d', sn, len(packdata))
             th_w.write(packdata)
             await th_w.drain()
     except:
@@ -105,7 +114,7 @@ async def to_thornclient(cli_r, cli_w, th_w, sn):
 async def relay_msg(reader, writer):
     try:
         addr = writer._transport._sock.getsockname()
-        log.debug('sockname: %s', addr)
+        #log.debug('sockname: %s', addr)
         port = addr[1]
 
         item = relay_map[port]
