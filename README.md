@@ -1,19 +1,20 @@
-## easyproxy
+## thorn
 
-thron是一个简单的内网穿透工具
+thorn是一个简单的内网穿透工具
 
-thron为内网服务器上运行，thronserver在外网服务器上运行
+thorn为内网服务器上运行，thornserver在外网服务器上运行
 
 
 启动方式：
 
 内网服务器运行：
-python3 thron.py
+python3 thron.py user 外网服务器ip:外网服务器port 内网服务器ip:内网服务器port
 
 外网服务器运行:
 python3 thronserver.py
 
-访问外网服务器的端口会自动转发到内网服务器的指定端口实现端口转发
+访问外网服务器的端口会自动转发到内网服务器的实现端口转发
 
 
-关于配置，见 config.py
+服务器配置，在config.py
+
