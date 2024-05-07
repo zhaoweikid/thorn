@@ -6,18 +6,17 @@ CMD_SEND = 1
 CMD_CLOSE = 2
 
 
-headlen = 7
+headlen = 9
 
 def pack(name, cmd, data):
-    # length(4B) + name(2B) + command(1B)
-    return struct.pack('IHB', len(data), int(name), cmd) + data
-
+    # length(4B) + name(4B) + command(1B)
+    return struct.pack('IIB', len(data), int(name), cmd) + data
 
 def pack_head(name, cmd, datalen):
-    return struct.pack('IHB', datalen, int(name), cmd)
+    return struct.pack('IIB', datalen, int(name), cmd)
 
 def unpack_head(rawdata):
-    return struct.unpack('IHB', rawdata)
+    return struct.unpack('IIB', rawdata)
 
 def auth(user, byte=False):
     s = 'AUTH {}\r\n'.format(user)
@@ -38,7 +37,7 @@ def error(err, byte=False):
     return s
 
 def unpack(s):
-    p = s.strip().split()
+    p = s.strip().split(None, 1)
     if len(p) == 1:
         p.append('')
     elif len(p) != 2:

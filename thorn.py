@@ -12,31 +12,44 @@ import asyncio
 import proto
 from zbase3.base import logger
 
-async def from_local(loc_r, loc_w, rem_w):
+name_conns = {}
+
+async def from_local(name, rem_w):
     log.debug('read data from local ...')
+    global name_conns
+    loc_r, loc_w = name_conns[name]
     while True:
-        data = await loc_r.read(8192*2)
+        try:
+            data = await loc_r.read(8192*2)
+        except:
+            log.info(traceback.format_exc())
+            data = ''
         log.debug('local >>> %d', len(data))
         if not data:
             log.info('read 0, local conn close, quit')
             #loc_w.write_eof()
             loc_w.close()
             await loc_w.wait_closed()
+            name_conns.pop(name)
             return
         
-        packdata = proto.pack(0, proto.CMD_SEND, data)
+        packdata = proto.pack(name, proto.CMD_SEND, data)
         log.debug('remote <<< %d', len(packdata))
         rem_w.write(packdata)
         await rem_w.drain()
 
-async def to_local(rem_r, rem_w, localport):
+async def to_local(rem_r, rem_w, local_addr):
+    global name_conns
     loc_r = None
     loc_w = None
+
+    localip, localport = local_addr
     while True:
         try:
             head = await rem_r.readexactly(proto.headlen)
         except exceptions.IncompleteReadError:
             log.info('read incomplete, thorn close, quit')
+            log.debug(traceback.format_exc())
             rem_w.close()
             await rem_w.wait_closed()
             return
@@ -69,11 +82,16 @@ async def to_local(rem_r, rem_w, localport):
 
         log.debug('remote >>> %d', len(data))
 
+        loc_r, loc_w = None, None
+        if name in name_conns:
+            loc_r, loc_w = name_conns[name]
+
         if not loc_w or loc_w.is_closing():
             log.debug('connect to local: %d', localport)
-            loc_r, loc_w = await asyncio.open_connection('127.0.0.1', localport)
+            loc_r, loc_w = await asyncio.open_connection(localip, localport)
             log.debug('connected')
-            t = asyncio.create_task(from_local(loc_r, loc_w, rem_w))
+            name_conns[name] = (loc_r, loc_w)
+            t = asyncio.create_task(from_local(name, rem_w))
             #await t
 
         log.debug('local <<< %d ^', len(data))
@@ -81,9 +99,7 @@ async def to_local(rem_r, rem_w, localport):
         await loc_w.drain()
 
 
-
-
-async def client(user, server_addr, localport):
+async def client(user, server_addr, local_addr):
     while True:
         await asyncio.sleep(1)
         log.warning('connect to {0}:{1}'.format(*server_addr))
@@ -107,23 +123,28 @@ async def client(user, server_addr, localport):
                 return
        
         log.info('ok, go relay ...')
-        await to_local(rem_r, rem_w, localport)
+        await to_local(rem_r, rem_w, local_addr)
 
 
 def main():
+    localip = '127.0.0.1'
     if len(sys.argv) == 4:
         user = sys.argv[1].strip()
         server = sys.argv[2].strip().split(':')
-        localport = int(sys.argv[3].strip())
+        if ':' in sys.argv[3]:
+            localip, localport = sys.argv[3].strip().split(':')
+        else:
+            localport = sys.argv[3].strip()
     else:
-        print('usage:\n\tpython3 thorn.py user remote-server-ip:remote-server-port local-port\n')
+        print('usage:\n\tpython3 thorn.py user remote-server-ip:remote-server-port local-ip:local-port\n')
         sys.exit(0)
    
     global log
     log = logger.install('stdout')
     server_addr = (server[0], int(server[1]))
+    local_addr = (localip, int(localport))
 
-    asyncio.run(client(user, server_addr, localport))
+    asyncio.run(client(user, server_addr, local_addr))
 
 
 if __name__ == '__main__':

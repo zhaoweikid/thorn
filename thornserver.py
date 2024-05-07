@@ -11,111 +11,149 @@ import asyncio
 import proto
 from zbase3.base import logger
 
-# port: reader, writer
+# port: {'stream':(reader, writer), 'no':1}
 relay_map = {}
 
-async def from_thornclient(th_r, th_w, cli_w):
-    fd = th_r._transport._sock_fd
-    while True:
-        head = await th_r.readexactly(proto.headlen)
-        log.debug('thorn %d >>> %s', fd, head)
-        if not head:
-            log.info('thorn read null, thorn close, quit')
-            th_w.close()
-            await th_w.wait_closed()
-            cli_r.feed_eof()
-            cli_w.close()
-            await cli_w.wait_closed()
-            break
-        length, name, cmd = proto.unpack_head(head)
-        
-        if length <= 0:
-            log.info('length error, thorn close, quit')
-            th_w.close()
-            await th_w.wait_closed()
-            cli_r.feed_eof()
-            cli_w.close()
-            await cli_w.wait_closed()
-            break
+async def from_thornclient(th_r, th_w, port):
+    global relay_map
 
-        data = await th_r.readexactly(length)
-        log.debug('thorn %d >>> %d', fd, len(data))
-        if cli_w.is_closing():
-            log.info('client closed!!!')
+    item = relay_map[port]
+
+    async def closeall():
         try:
-            log.debug('client %d <<< %d ^', cli_w._transport._sock_fd, len(data))        
-            cli_w.write(data)
-            await cli_w.drain()
+            th_w.close()
+            await th_w.wait_closed()
+            for x in item['clients'].values():
+                r, w = x
+                r.feed_eof()
+                w.close()
+                await w.wait_closed()
+        
+            server = item['server']
+            server.close()
+            await server.wait_closed()
         except:
-            log.info(traceback.format_exc())
-            break
+            log.debug(traceback.format_exc())
+
+
+    try:
+        fd = th_r._transport._sock_fd
+        log.debug('wait data from thorn ...')
+        while True:
+            head = await th_r.readexactly(proto.headlen)
+            log.debug('thorn %d >>> %s', fd, head)
+            if not head:
+                log.info('thorn read null, thorn close, quit')
+                closeall()
+                break
+            length, name, cmd = proto.unpack_head(head)
+            
+            if length <= 0:
+                log.info('length error, thorn close, quit')
+                closeall()
+                break
+
+            data = await th_r.readexactly(length)
+            log.debug('thorn %d >>> %d', fd, len(data))
+           
+            cli = item['clients'].get(name)
+            if not cli:
+                log.debug('not found name %d, skip', name)
+                continue
+            cli_r, cli_w = cli
+
+            if cli_w.is_closing():
+                log.info('client %d closed, skip', name)
+                continue
+
+            try:
+                log.debug('client %d <<< %d ^', cli_w._transport._sock_fd, len(data))        
+                cli_w.write(data)
+                await cli_w.drain()
+            except:
+                log.info(traceback.format_exc())
+                break
+    except:
+        log.debug(traceback.format_exc())
 
     log.debug('from_thornclient complete!!!')
 
-async def to_thornclient(cli_r, cli_w, th_w):
-    while True:
-        data = await cli_r.read(8192*2)
-        log.debug('client %d >>> %d', cli_w._transport._sock_fd, len(data))        
-        if not data:
-            log.info('read 0, client conn close, quit')
-            #if not th_w.is_closing():
-            #    th_w.close()
-            if not cli_w.is_closing():
-                cli_w.close()
-                await cli_w.wait_closed()
-            break
-        packdata = proto.pack(0, proto.CMD_SEND, data)
-        log.debug('thorn %d <<< %d', th_w._transport._sock_fd, len(packdata))
-        th_w.write(packdata)
-        await th_w.drain()
+async def to_thornclient(cli_r, cli_w, th_w, sn):
+    log.debug('wait data from client:%d ...', sn)
+    try:
+        while True:
+            data = await cli_r.read(8192*2)
+            log.debug('client %d >>> %d', cli_w._transport._sock_fd, len(data))        
+            if not data:
+                log.info('read 0, client conn close, quit')
+                #if not th_w.is_closing():
+                #    th_w.close()
+                if not cli_w.is_closing():
+                    cli_w.close()
+                    await cli_w.wait_closed()
+                break
+            packdata = proto.pack(sn, proto.CMD_SEND, data)
+            log.debug('thorn %d <<< %d', th_w._transport._sock_fd, len(packdata))
+            th_w.write(packdata)
+            await th_w.drain()
+    except:
+        log.debug(traceback.format_exc())
 
     log.debug('to_thornclient complete!!!')
 
 
 async def relay_msg(reader, writer):
-    addr = writer._transport._sock.getsockname()
-    log.debug('sockname: %s', addr)
-    port = addr[1]
+    try:
+        addr = writer._transport._sock.getsockname()
+        log.debug('sockname: %s', addr)
+        port = addr[1]
 
-    thorncli = relay_map[port]
-    thstream = thorncli['stream']
+        item = relay_map[port]
+        th_r, th_w = item['thorn']
+        
+        item['sn'] += 1
 
-    log.info('new relay client: %s', writer._transport._sock.getpeername())
-    t1 = asyncio.create_task(to_thornclient(reader, writer, thstream[1]))
-    t2 = asyncio.create_task(from_thornclient(thstream[0], thstream[1], writer))  
-    await t1
+        sn = port * 10000 + item['sn'] % 10000
 
-    log.debug('to_thornclient task waited.')
-    t2.cancel()
-    #await t2
-    log.info('task complete')
+        item['clients'][sn] = [reader, writer]
 
-    #thorncli['server'].close()
+        log.info('new relay client:%s name:%d', writer._transport._sock.getpeername(), sn)
+        t = asyncio.create_task(to_thornclient(reader, writer, th_w, sn))
+        await t
+
+        item['clients'].pop(sn) 
+    except:
+        log.debug(traceback.format_exc())
+    log.debug('relay_msg complete')
 
 
-
-async def relay_server(cf, cli_r, cli_w):
+async def relay_server(cf, th_r, th_w):
     global relay_map
-    port = cf['remote']
+    port = cf['port']
 
-    item = relay_map.get(port)
+    log.info('relay server start at {0}:{1}'.format(config.HOST[0], port)) 
+    relay_serv = await asyncio.start_server(relay_msg, 
+        config.HOST[0], port)
 
-    if not item:
-        log.info('relay server start at {0}:{1}'.format(config.HOST[0], cf['remote'])) 
-        relay_serv = await asyncio.start_server(relay_msg, 
-            config.HOST[0], cf['remote'])
+    relay_map[port] = {
+        'thorn':[th_r, th_w], 
+        'server':relay_serv,
+        'sn':1,
+        'clients':{} # {no:[r, w]}
+    }
+    
+    # 从thorn客户端转发消息给接入方
+    t = asyncio.create_task(from_thornclient(th_r, th_w, port))
 
-        relay_map[port] = {'stream':[cli_r, cli_w], 'server':relay_serv}
-        async with relay_serv:
-            await relay_serv.serve_forever()
-    else:
-        item['stream'] = [cli_r, cli_w]
-        log.info('relay server reuse at {0}:{1}'.format(config.HOST[0], cf['remote'])) 
+    async with relay_serv:
+        await relay_serv.serve_forever()
 
+    relay_map.pop(port)
 
-
+    log.debug('relay_server complete!!!')
 
 async def server_msg(serv_reader, serv_writer):
+    global relay_map
     while True:
         ln = await serv_reader.readline()
         log.debug('thorn >> %s', ln)
@@ -132,11 +170,18 @@ async def server_msg(serv_reader, serv_writer):
                 serv_writer.write(ret.encode('utf-8'))
                 await serv_writer.drain()
                 continue
-
-            ret = proto.ok()
-            log.info(f'thorn << {ret}')
-            serv_writer.write(ret.encode('utf-8'))
-            await serv_writer.drain()
+       
+            if cf['port'] not in relay_map:
+                ret = proto.ok()
+                log.info(f'thorn << {ret}')
+                serv_writer.write(ret.encode('utf-8'))
+                await serv_writer.drain()
+            else:
+                ret = proto.error('another thorn connected')
+                log.info(f'thorn << {ret}')
+                serv_writer.write(ret.encode('utf-8'))
+                await serv_writer.drain()
+                continue
             
             log.debug('relay_server ...')
             await relay_server(cf, serv_reader, serv_writer)
