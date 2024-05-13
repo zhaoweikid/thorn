@@ -12,10 +12,11 @@ import asyncio
 import proto
 from zbase3.base import logger
 
+# 所有的连接
 name_conns = {}
 
 async def from_local(name, rem_w):
-    log.debug('read data from local ...')
+    log.debug('read client %d ...', name)
     global name_conns
     loc_r, loc_w = name_conns[name]
     while True:
@@ -24,17 +25,23 @@ async def from_local(name, rem_w):
         except:
             log.info(traceback.format_exc())
             data = ''
-        log.debug('local >>> %d', len(data))
+        log.debug('c >>> %d', len(data))
         if not data:
-            log.info('read 0, local conn close, quit')
+            log.info('read 0, conn %d close, quit', name)
             #loc_w.write_eof()
             loc_w.close()
             await loc_w.wait_closed()
+            log.debug('remove conn:%d', name)
             name_conns.pop(name)
+
+            pkdata = proto.cmd_close(name)
+            log.debug('s <<< cmd_close %d', len(pkdata))
+            rem_w.write(pkdata)
+            await rem_w.drain()
             return
         
         packdata = proto.pack(name, proto.CMD_SEND, data)
-        log.debug('remote <<< %d', len(packdata))
+        log.debug('s <<< %d', len(packdata))
         rem_w.write(packdata)
         await rem_w.drain()
 
@@ -44,22 +51,22 @@ async def to_local(rem_r, rem_w, local_addr):
     loc_w = None
 
     localip, localport = local_addr
+    log.debug('read server ...')
     while True:
         try:
             head = await rem_r.readexactly(proto.headlen)
         except exceptions.IncompleteReadError:
-            log.info('read incomplete, thorn close, quit')
+            log.info('read server incomplete, thorn close, quit')
             log.debug(traceback.format_exc())
             rem_w.close()
             await rem_w.wait_closed()
             return
 
-        log.debug('remote >>> %s', head)
+        log.debug('s >>> %s', head)
         if not head:
-            log.info('read null, thorn close, quit')
+            log.info('read 0, thorn close, quit')
             rem_w.close()
             await rem_w.wait_closed()
-
             return
 
         length, name, cmd = proto.unpack_head(head)
@@ -80,21 +87,20 @@ async def to_local(rem_r, rem_w, local_addr):
 
             return
 
-        log.debug('remote >>> %d', len(data))
-
+        #log.debug('s >>> %d', len(data))
         loc_r, loc_w = None, None
         if name in name_conns:
             loc_r, loc_w = name_conns[name]
 
         if not loc_w or loc_w.is_closing():
-            log.debug('connect to local: %d', localport)
+            log.debug('connect to %s:%d', localip, localport)
             loc_r, loc_w = await asyncio.open_connection(localip, localport)
             log.debug('connected')
             name_conns[name] = (loc_r, loc_w)
             t = asyncio.create_task(from_local(name, rem_w))
             #await t
 
-        log.debug('local <<< %d ^', len(data))
+        #log.debug('c <<< %d ^', len(data))
         loc_w.write(data)
         await loc_w.drain()
 
@@ -107,14 +113,14 @@ async def client(user, server_addr, local_addr):
 
         while True:
             s = 'AUTH {0}\r\n'.format(user)
-            log.debug('remote <<< %s', s)
+            log.debug('s <<< %s', s)
             rem_w.write(s.encode('utf-8'))
 
             ln = await rem_r.readline()
             if not ln:
                 log.info('readline 0, quit')
                 return
-            log.debug('remote >>> %s', ln)
+            log.debug('s >>> %s', ln)
             ret = ln[:2]
             if ret == b'OK':
                 break
@@ -122,7 +128,7 @@ async def client(user, server_addr, local_addr):
                 log.info('auth error: %s', ln)
                 return
        
-        log.info('ok, go relay ...')
+        log.info('ok, ready ...')
         await to_local(rem_r, rem_w, local_addr)
 
 
@@ -136,7 +142,7 @@ def main():
         else:
             localport = sys.argv[3].strip()
     else:
-        print('usage:\n\tpython3 thorn.py user remote-server-ip:remote-server-port local-ip:local-port\n')
+        print('usage:\n\tpython3 thorn.py username server-ip:server-port local-ip:local-port\n')
         sys.exit(0)
    
     global log
