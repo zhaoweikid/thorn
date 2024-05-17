@@ -103,7 +103,7 @@ async def server_to_local(serv_r, serv_w, local_addr):
             loc_r, loc_w = await asyncio.open_connection(localip, localport)
             log.debug('connected')
             name_conns[name] = (loc_r, loc_w)
-            t = asyncio.create_task(from_local(name, rem_w))
+            t = asyncio.create_task(from_local(name, serv_w))
             #await t
 
         #log.debug('c <<< %d ^', len(data))
