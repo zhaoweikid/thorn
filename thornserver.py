@@ -1,4 +1,5 @@
 # coding: utf-8
+import asyncio
 import os, sys
 import struct
 import socket
@@ -6,10 +7,9 @@ import time
 import traceback
 import config
 from errno import EAGAIN, EBADF, EPIPE, ECONNRESET
-import logging
-import asyncio
 import proto
-from zbase3.base import logger
+import logger
+import logging
 
 # port: {'stream':(reader, writer), 'no':1}
 relay_map = {}

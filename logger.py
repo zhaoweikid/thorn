@@ -1,5 +1,5 @@
 # coding: utf-8
-
+import asyncio
 import sys
 import types
 import logging
@@ -31,6 +31,17 @@ class ScreenHandler(logging.StreamHandler):
             self.handleError(record)
 
 logging.ScreenHandler = ScreenHandler
+
+
+class MyLogRecord (logging.LogRecord):
+    def __init__(self, *args, **kwargs):
+        logging.LogRecord.__init__(self, *args, **kwargs)
+        t = asyncio.current_task()
+        self.taskName = t.get_name()
+
+
+logging.setLogRecordFactory(MyLogRecord)
+
 
 def debug(msg, *args, **kwargs):
     global log
@@ -72,7 +83,7 @@ def install(logdict, **options):
         'version': 1,
         'formatters': {
             'myformat': {
-                'format': '%(asctime)s %(process)d,%(threadName)s %(filename)s:%(lineno)d [%(levelname)s] %(message)s',
+                'format': '%(asctime)s %(taskName)s %(filename)s:%(lineno)d [%(levelname)s] %(message)s',
             },  
         },  
         'handlers': {
@@ -83,6 +94,7 @@ def install(logdict, **options):
                 'stream': 'ext://sys.stdout',
             },  
         },  
+        'datefmt':'%m%d %H:%M:%S',
         'loggers': {
         },  
     }
