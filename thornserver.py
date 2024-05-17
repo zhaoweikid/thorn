@@ -13,53 +13,84 @@ from zbase3.base import logger
 
 # port: {'stream':(reader, writer), 'no':1}
 relay_map = {}
+# 网络读超市时间,s
+timeout = 30
 
 class RelayInfo (object):
     def __init__(self, thorn_r, thorn_w, server, port):
         self.thorn_r = thorn_r
         self.thorn_w = thorn_w
         self.server = server
+        
+        self.thorn_task = None
+
         self.port = port
         self.sn = 1
         # name: (r, w)
         self.clients = {}
 
     async def close(self):
+        global relay_map
         try:
+            log.debug('close relay server')
             self.server.close()
             await self.server.wait_closed()
 
             await self.close_allclient()
-            
+          
+            log.debug('close thorn')
+            self.thorn_r.feed_eof()
             self.thorn_w.close()
             await self.thorn_w.wait_closed()
+            
+            log.debug('all closed')
+            try:
+                relay_map.pop(self.port)
+            except:
+                pass
         except:
             log.debug(traceback.format_exc())
 
     async def close_allclient(self):
-        for r,w in list(self.clients.values()):
-            r.feed_eof()
-            w.close()
-            await w.wait_closed()
+        log.debug('close allclient')
+        try:
+            for r,w in list(self.clients.values()):
+                r.feed_eof()
+                w.close()
+                await w.wait_closed()
+            self.clients = {}
+        except:
+            log.debug(traceback.format_exc())
         
     async def close_client(self, name):
-        c = self.clients.get(name)
-        if c:
-            c[1].close()
-            await c[1].wait_closed()
-            self.clients.pop(name)
+        try:
+            log.debug('close client:%d', name)
+            c = self.clients.get(name)
+            if c:
+                c[0].feed_eof()
+                c[1].close()
+                await c[1].wait_closed()
+                log.debug('pop:%d', name)
+                self.clients.pop(name)
+        except:
+            log.debug(traceback.format_exc())
 
 
 async def from_thorn(th_r, th_w, port):
     '''从thorn读取数据发送给client'''
-    global relay_map
+    global relay_map, timeout
     item = relay_map[port]
-
+    
     try:
         log.debug('wait data from thorn ...')
         while True:
-            head = await th_r.readexactly(proto.headlen)
-            log.debug('thorn >>> %s', head)
+            try:
+                head = await asyncio.wait_for(th_r.readexactly(proto.headlen), timeout=60)
+                log.debug('thorn >>> %s', head)
+            except asyncio.TimeoutError:
+                log.debug('thorn read timeout, continue')
+                continue
+
             if not head:
                 log.info('thorn read null, thorn close, quit')
                 await item.close()
@@ -72,8 +103,13 @@ async def from_thorn(th_r, th_w, port):
                 break
 
             if length > 0:
-                data = await th_r.readexactly(length)
-                log.debug('thorn >>> %d', len(data))
+                try:
+                    data = await asyncio.wait_for(th_r.readexactly(length), timeout=timeout*3)
+                    log.debug('thorn >>> %d', len(data))
+                except asyncio.TimeoutError:
+                    log.debug('thorn read body timeout, quit')
+                    await item.close()
+                    break
             else:
                 data = ''
                 log.debug('thorn cmd %d not have data', cmd)
@@ -110,23 +146,33 @@ async def from_thorn(th_r, th_w, port):
                 break
     except:
         log.debug(traceback.format_exc())
-
+        await item.close()
+    try:
+        log.debug('serving: {}'.format(item.server.is_serving()))
+        item.thorn_task.cancel()
+    except:
+        log.debug(traceback.format_exc())
     log.debug('from_thorn complete!!!')
 
-async def from_client(cli_r, cli_w, th_w, clisn):
+async def from_client(cli_r, cli_w, th_w, clisn, port):
     '''从client转发数据给thorn'''
     log.debug('wait data from client:%d ...', clisn)
+    global timeout, relay_map
+
+    item = relay_map[port]
+
     try:
         while True:
-            data = await cli_r.read(8192*2)
+            try:
+                data = await asyncio.wait_for(cli_r.read(8192*2), timeout=timeout)
+            except asyncio.TimeoutError:
+                log.debug('read client %d timeout, continue', clisn)
+                continue
+            
             log.debug('client %d >>> %d', clisn, len(data))        
             if not data:
                 log.info('read 0, client %d close, quit', clisn)
-                #if not th_w.is_closing():
-                #    th_w.close()
-                if not cli_w.is_closing():
-                    cli_w.close()
-                    await cli_w.wait_closed()
+                await item.close_client(clisn)
                 break
             pkdata = proto.pack(clisn, proto.CMD_SEND, data)
             log.debug('thorn %d <<< %d', clisn, len(pkdata))
@@ -141,24 +187,26 @@ async def from_client(cli_r, cli_w, th_w, clisn):
 async def relay_msg(reader, writer):
     try:
         addr = writer._transport._sock.getsockname()
-        #log.debug('sockname: %s', addr)
+        peer = writer._transport._sock.getpeername()
         port = addr[1]
 
         item = relay_map[port]
         th_r, th_w = item.thorn_r, item.thorn_w
         
         item.sn += 1
-
         sn = port * 10000 + item.sn % 10000
 
         item.clients[sn] = [reader, writer]
 
-        log.info('new relay client:%s name:%d', writer._transport._sock.getpeername(), sn)
-        t = asyncio.create_task(from_client(reader, writer, th_w, sn))
+        log.info('new relay client:%s name:%d', peer, sn)
+        t = asyncio.create_task(from_client(reader, writer, th_w, sn, port))
         await t
             
         log.debug('pop %d', sn)
-        item.clients.pop(sn) 
+        try:
+            item.clients.pop(sn) 
+        except:
+            pass
     except:
         log.debug(traceback.format_exc())
     log.debug('relay_msg complete')
@@ -172,22 +220,41 @@ async def relay_server(cf, th_r, th_w):
     relay_serv = await asyncio.start_server(relay_msg, 
         config.HOST[0], port)
 
-    relay_map[port] = RelayInfo(th_r, th_w, relay_serv, port)
+    ri = RelayInfo(th_r, th_w, relay_serv, port)
+    relay_map[port] = ri
     
     # 从thorn客户端转发消息给接入方
     t = asyncio.create_task(from_thorn(th_r, th_w, port))
+    ri.thorn_task = t
 
     async with relay_serv:
-        await relay_serv.serve_forever()
-
-    relay_map.pop(port)
+        try:
+            await relay_serv.serve_forever()
+        except:
+            log.debug(traceback.format_exc())
+    log.debug('relay_server closed')   
+    try:
+        relay_map.pop(port)
+    except:
+        log.debug(traceback.format_exc())
 
     log.debug('relay_server complete!!!')
 
 async def server_msg(serv_reader, serv_writer):
     global relay_map
+
+    peer = serv_writer._transport._sock.getpeername()
+    log.debug('thorn from %s:%d', peer[0], peer[1])
+
+    timeout = 30
     while True:
-        ln = await serv_reader.readline()
+        try:
+            ln = await asyncio.wait_for(serv_reader.readline(), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.debug('thorn read timeout:%d, quit', timeout)
+            serv_writer.close()
+            await serv_writer.wait_closed()
+            return
         log.debug('thorn >> %s', ln)
         if not ln:
             log.debug('read null, close')
@@ -235,7 +302,7 @@ async def server():
 
 def main():
     global log
-    log = logger.install('stdout')
+    log = logger.install(config.LOGFILE)
 
     asyncio.run(server())
 

@@ -15,7 +15,9 @@ from zbase3.base import logger
 # 所有的连接
 name_conns = {}
 
-async def from_local(name, rem_w):
+timeout = 30
+
+async def from_local(name, serv_w):
     log.debug('read client %d ...', name)
     global name_conns
     loc_r, loc_w = name_conns[name]
@@ -36,55 +38,59 @@ async def from_local(name, rem_w):
 
             pkdata = proto.cmd_close(name)
             log.debug('s <<< cmd_close %d', len(pkdata))
-            rem_w.write(pkdata)
-            await rem_w.drain()
+            serv_w.write(pkdata)
+            await serv_w.drain()
             return
         
         packdata = proto.pack(name, proto.CMD_SEND, data)
         log.debug('s <<< %d', len(packdata))
-        rem_w.write(packdata)
-        await rem_w.drain()
+        serv_w.write(packdata)
+        await serv_w.drain()
 
-async def to_local(rem_r, rem_w, local_addr):
-    global name_conns
+async def server_to_local(serv_r, serv_w, local_addr):
+    global name_conns, timeout
     loc_r = None
     loc_w = None
 
     localip, localport = local_addr
-    log.debug('read server ...')
+    log.debug('read from server ...')
     while True:
         try:
-            head = await rem_r.readexactly(proto.headlen)
+            head = await asyncio.wait_for(serv_r.readexactly(proto.headlen), timeout=timeout)
+        except asyncio.TimeoutError:
+            log.debug('read server timeout, continue')
+            continue
         except exceptions.IncompleteReadError:
             log.info('read server incomplete, thorn close, quit')
-            log.debug(traceback.format_exc())
-            rem_w.close()
-            await rem_w.wait_closed()
+            #log.debug(traceback.format_exc())
+            serv_w.close()
+            await serv_w.wait_closed()
             return
 
         log.debug('s >>> %s', head)
         if not head:
             log.info('read 0, thorn close, quit')
-            rem_w.close()
-            await rem_w.wait_closed()
+            serv_w.close()
+            await serv_w.wait_closed()
             return
 
         length, name, cmd = proto.unpack_head(head)
         log.debug(f'length:{length} name:{name} cmd:{cmd}') 
         if length <= 0:
             log.info('length error, thorn close, quit')
-            rem_w.close()
-            await rem_w.wait_closed()
-
+            serv_w.close()
+            await serv_w.wait_closed()
             return
 
         try:
-            data = await rem_r.readexactly(length)
+            data = await asyncio.wait_for(serv_r.readexactly(length), timeout=timeout*3)
+        except asyncio.TimeoutError:
+            log.debug('read body %d from server timeout, quit', length)
+            return
         except exceptions.IncompleteReadError:
             log.info('read length incomplete, thorn close, quit')
-            rem_w.close()
-            await rem_w.wait_closed()
-
+            serv_w.close()
+            await serv_w.wait_closed()
             return
 
         #log.debug('s >>> %d', len(data))
@@ -109,17 +115,22 @@ async def client(user, server_addr, local_addr):
     while True:
         await asyncio.sleep(1)
         log.warning('connect to {0}:{1}'.format(*server_addr))
-        rem_r, rem_w = await asyncio.open_connection(server_addr[0], server_addr[1])
+        serv_r, serv_w = await asyncio.open_connection(server_addr[0], server_addr[1])
 
         while True:
             s = 'AUTH {0}\r\n'.format(user)
             log.debug('s <<< %s', s)
-            rem_w.write(s.encode('utf-8'))
+            serv_w.write(s.encode('utf-8'))
 
-            ln = await rem_r.readline()
-            if not ln:
-                log.info('readline 0, quit')
+            try:
+                ln = await asyncio.wait_for(serv_r.readline(), timeout=30)
+                if not ln:
+                    log.info('readline 0, quit')
+                    return
+            except asyncio.TimeoutError:
+                log.info('read server timeout, quit')
                 return
+
             log.debug('s >>> %s', ln)
             ret = ln[:2]
             if ret == b'OK':
@@ -129,7 +140,7 @@ async def client(user, server_addr, local_addr):
                 return
        
         log.info('ok, ready ...')
-        await to_local(rem_r, rem_w, local_addr)
+        await server_to_local(serv_r, serv_w, local_addr)
 
 
 def main():
