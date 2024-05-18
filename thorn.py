@@ -125,11 +125,21 @@ async def client(user, server_addr, local_addr):
             try:
                 ln = await asyncio.wait_for(serv_r.readline(), timeout=30)
                 if not ln:
-                    log.info('readline 0, quit')
-                    return
+                    log.info('readline 0, restart')
+                    try:
+                        serv_w.close()
+                        await serv_w.wait_closed()
+                    except:
+                        log.debug(traceback.format_exc())
+                    break
             except asyncio.TimeoutError:
-                log.info('read server timeout, quit')
-                return
+                log.info('read server timeout, restart')
+                try:
+                    serv_w.close()
+                    await serv_w.wait_closed()
+                except:
+                    log.debug(traceback.format_exc())
+                break
 
             log.debug('s >>> %s', ln)
             ret = ln[:2]
