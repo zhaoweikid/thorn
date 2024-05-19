@@ -14,167 +14,261 @@ import logging
 
 # 所有的连接
 name_conns = {}
-timeout = 30
+# 网络读超时
+timeout = 10
 
-async def from_local(name, serv_w):
-    log.debug('read local %d ...', name)
-    global name_conns
-    loc_r, loc_w = name_conns[name]
+async def do_close(w):
+    try:
+        w.close()
+        await w.wait_closed()
+    except:
+        log.debug(traceback.format_exc())
+
+async def do_write(w, data):
+    try:
+        w.write(data)
+        await w.drain()
+        return True
+    except:
+        log.debug('write error: ', traceback.fromat_exc())
+        do_close(w)
+        return False
+
+class Connection:
+    def __init__(self, addr, name='', r=None, w=None, task=None):
+        self.addr = addr
+        self.name = name
+        self.r = r
+        self.w = w
+        self.task = task
+
+        self._pings = []
+
+    async def open(self):
+        self.r = None
+        self.w = None
+        try:
+            log.warning('connect to %s:%d', self.addr[0], self.addr[1])
+            self.r, self.w = await asyncio.open_connection(self.addr[0], self.addr[1])
+            log.debug('connected')
+            return True
+        except:
+            log.debug('connect error: %s', traceback.format_exc())
+            return False
+
+    async def readline(self, timeout=30):
+        try:
+            ln = await asyncio.wait_for(self.r.readline(), timeout=timeout)
+            if not ln:
+                log.info('readline 0, close')
+                self.close()
+                return ''
+        except asyncio.TimeoutError:
+            log.info('readline timeout, close')
+            self.close()
+            return ''
+        except:
+            log.debug('readline error: %s', traceback.format_exc())
+            return ''
+
+    async def readn(self, n, timeout=30):
+        try:
+            ln = await asyncio.wait_for(self.r.readexactly(n), timeout=timeout)
+            if not ln:
+                log.info('readexactly 0, close')
+                self.close()
+                return ''
+            return ln
+        except asyncio.TimeoutError:
+            log.info('readexactly timeout, close')
+            self.close()
+            return ''
+        except exceptions.IncompleteReadError:
+            log.info('readexactly incomplete, close')
+            self.close()
+            return ''
+        except:
+            log.debug('readexactly error: %s', traceback.format_exc())
+            return ''
+
+    async def readn_raise_timeout(self, n, timeout=30):
+        try:
+            ln = await asyncio.wait_for(self.r.readexactly(n), timeout=timeout)
+            if not ln:
+                log.info('readexactly 0, close')
+                self.close()
+                return ''
+            return ln
+        except asyncio.TimeoutError:
+            log.info('readexactly timeout')
+            raise
+        except exceptions.IncompleteReadError:
+            log.info('readexactly incomplete, close')
+            self.close()
+            return ''
+        except:
+            log.debug('readexactly error: %s', traceback.format_exc())
+            return ''
+
+    async def write(self, data, name=''):
+        if not name:
+            name = self.name
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+
+        pkdata = proto.pack(name, proto.CMD_SEND, data)
+        log.debug('s <<< %d', len(pkdata))
+
+        return await do_write(self.w, pkdata)
+
+    async def _write(self, data):
+        if isinstance(data, str):
+            data = data.encode('utf-8')
+        return await do_write(self.w, data)
+
+    async def close(self):
+        global name_conns
+        await do_close(self.w)
+        self.r = None
+        self.w = None
+        try:
+            name_conns.pop(self.name)
+        except:
+            pass
+
+    async def send_close(self, name=''):
+        if not name:
+            name = self.name
+        pkdata = proto.cmd_close(name)
+        log.debug('s <<< cmd_close %d', len(pkdata))
+        return await self._write(pkdata)
+
+    async def send_auth(self, user):
+        s = proto.auth(user)
+        log.debug('s <<< %s', s)
+        return await self._write(s)
+    
+    async def send_ping(self):
+        global timeout
+        now = time.time() 
+        tm = str(time.time())
+
+        if self._pings:
+            noreply = float(self._pings[0])
+            if now-noreplay > timeout*3: 
+                log.debug('server maybe disconnect, quit')
+                self.close()
+                return False
+        #log.debug('ping time:%s', tm)
+        self._pings.append(tm)
+        pkdata = proto.cmd_ping(data=tm)
+        log.debug('s <<< cmd_ping %d', len(pkdata))
+
+        return await self._write(pkdata)
+
+    async def send_pong(self, name, data):
+        pkdata = proto.cmd_pong(name, data)
+        return await server._write(pkdata)
+
+    def apply_pong(self, name, data):
+        now = time.time()
+        log.debug('latency:%f', now-float(data))
+        pongdata = data.decode('utf-8')
+        for i in range(0, len(self._pings)):
+            if self._pings[i] == pongdata:
+                self._pings = self._pings[i+1:]
+                return
+        else:
+            log.debug('not found ping data, contiue')
+
+
+
+async def local_to_server(c, server):
+    log.debug('read local %d ...', c.name)
+    
     while True:
         try:
-            data = await loc_r.read(8192*2)
+            data = await c.r.read(8192*2)
         except:
             log.info(traceback.format_exc())
             data = ''
+        
         log.debug('c >>> %d %s', len(data), data)
         if not data:
-            log.info('read 0, conn %d close, quit', name)
-            #loc_w.write_eof()
-            loc_w.close()
-            await loc_w.wait_closed()
-            log.debug('remove conn:%d', name)
-            name_conns.pop(name)
+            log.info('read 0, conn %d close, quit', c.name)
+            await c.close()
 
-            pkdata = proto.cmd_close(name)
-            log.debug('s <<< cmd_close %d', len(pkdata))
-            serv_w.write(pkdata)
-            await serv_w.drain()
+            await server.send_close(c.name)
             return
         
-        packdata = proto.pack(name, proto.CMD_SEND, data)
-        log.debug('s <<< %d', len(packdata))
-        serv_w.write(packdata)
-        await serv_w.drain()
+        if not await server.write(data, c.name):
+            return
 
-async def server_to_local(serv_r, serv_w, local_addr):
+async def server_to_local(server, local_addr):
     global name_conns, timeout
-    loc_r = None
-    loc_w = None
 
-    # ping记录
-    pings = []
-
-    localip, localport = local_addr
     log.debug('read from server ...')
     while True:
         try:
-            head = await asyncio.wait_for(serv_r.readexactly(proto.headlen), timeout=timeout)
-        except asyncio.TimeoutError:
-            #log.debug('read server timeout, continue')
-            tm = str(time.time())
-            #log.debug('ping time:%s', tm)
-            pings.append(tm)
-            pkdata = proto.cmd_ping(data=tm)
-            log.debug('s <<< cmd_ping %d', len(pkdata))
-            try:
-                serv_w.write(pkdata)
-                await serv_w.drain()
-            except:
-                log.debug('send data to server error, quit')
-                log.debug(traceback.format_exc())
-                serv_w.close()
-                await serv_w.wait_closed()
-                return
- 
-            continue
-        except exceptions.IncompleteReadError:
-            log.info('read server incomplete, thorn close, quit')
-            #log.debug(traceback.format_exc())
-            serv_w.close()
-            await serv_w.wait_closed()
+            head = await server.readn_raise_timeout(proto.headlen, timeout=timeout)
+        except:
             return
+            if not await server.send_ping():
+                return
+            continue
 
-        log.debug('s >>> %s', head)
+        #log.debug('s >>> %s', head)
         if not head:
-            log.info('read 0, thorn close, quit')
-            serv_w.close()
-            await serv_w.wait_closed()
             return
 
         length, name, cmd = proto.unpack_head(head)
-        log.debug(f'length:{length} name:{name} cmd:{cmd}') 
+        log.debug(f's >>> {head} {length} {name} {cmd}') 
         if length <= 0:
             log.info('length error, thorn close, quit')
-            serv_w.close()
-            await serv_w.wait_closed()
+            server.close()
             return
 
-        try:
-            data = await asyncio.wait_for(serv_r.readexactly(length), timeout=timeout*3)
-        except asyncio.TimeoutError:
-            log.debug('read body %d from server timeout, quit', length)
-            return
-        except exceptions.IncompleteReadError:
-            log.info('read length incomplete, thorn close, quit')
-            serv_w.close()
-            await serv_w.wait_closed()
+        data = await server.readn(length, timeout=timeout*3)
+        if not data:
             return
 
         if cmd == proto.CMD_PING:
-            pkdata = proto.cmd_pong(name, data)
-            serv_w.write(pkdata)
-            await serv_w.drain()
+            if not await server.send_pong(name, data):
+                return
             continue
         elif cmd == proto.CMD_PONG:
-            #log.debug('pong data:%s', data)
-            now = time.time()
-            log.debug('latency:%f', now-float(data))
-            pongdata = data.decode('utf-8')
-            for i in range(0, len(pings)):
-                if pings[i] == pongdata:
-                    pings = pings[i+1:]
-                    break
-            else:
-                log.debug('not found ping data, contiue')
-
+            server.apply_pong(name, data)
             continue
-            
+        
         #log.debug('s >>> %d %s', len(data), data)
-        loc_r, loc_w = None, None
-        if name in name_conns:
-            loc_r, loc_w = name_conns[name]
-
-        if not loc_w or loc_w.is_closing():
-            log.debug('connect to %s:%d', localip, localport)
-            loc_r, loc_w = await asyncio.open_connection(localip, localport)
-            log.debug('connected')
-            name_conns[name] = (loc_r, loc_w)
-            t = asyncio.create_task(from_local(name, serv_w))
-            #await t
+        c = name_conns.get(name, None)
+        if not c or c.w.is_closing():
+            c = Connection(addr=localaddr, name=name)
+            await c.open()
+            t = asyncio.create_task(local_to_server(c, server))
+            c.task = t
+            name_conns[name] = c
 
         log.debug('c <<< %d ^', len(data))
-        loc_w.write(data)
-        await loc_w.drain()
+        if not await c.write(data):
+            return
 
 
 async def client(user, server_addr, local_addr):
     while True:
         await asyncio.sleep(1)
-        log.warning('connect to {0}:{1}'.format(*server_addr))
-        serv_r, serv_w = await asyncio.open_connection(server_addr[0], server_addr[1])
+        #log.warning('connect to {0}:{1}'.format(*server_addr))
+
+        server = Connection(addr=server_addr)
+        if not await server.open():
+            return
 
         while True:
-            s = 'AUTH {0}\r\n'.format(user)
-            log.debug('s <<< %s', s)
-            serv_w.write(s.encode('utf-8'))
+            if not await server.send_auth(user):
+                break
 
-            try:
-                ln = await asyncio.wait_for(serv_r.readline(), timeout=30)
-                if not ln:
-                    log.info('readline 0, restart')
-                    try:
-                        serv_w.close()
-                        await serv_w.wait_closed()
-                    except:
-                        log.debug(traceback.format_exc())
-                    break
-            except asyncio.TimeoutError:
-                log.info('read server timeout, restart')
-                try:
-                    serv_w.close()
-                    await serv_w.wait_closed()
-                except:
-                    log.debug(traceback.format_exc())
+            ln = await server.readline(timeout=timeout)
+            if not ln:
                 break
 
             log.debug('s >>> %s', ln)
@@ -186,7 +280,7 @@ async def client(user, server_addr, local_addr):
                 return
        
         log.info('ok, ready ...')
-        await server_to_local(serv_r, serv_w, local_addr)
+        await server_to_local(server, local_addr)
 
 
 def main():
