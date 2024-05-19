@@ -212,7 +212,6 @@ async def server_to_local(server, local_addr):
         try:
             head = await server.readn_raise_timeout(proto.headlen, timeout=timeout)
         except:
-            return
             if not await server.send_ping():
                 return
             continue
