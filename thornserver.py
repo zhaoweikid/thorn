@@ -116,10 +116,12 @@ async def from_thorn(th_r, th_w, port):
 
             # ping只是用来在thorn和server之间保持连接
             if cmd == proto.CMD_PING:
-                th_w.write(proto.cmd_pong(name))
+                log.debug('cmd ping:%s', data)
+                th_w.write(proto.cmd_pong(name, data))
                 await th_w.drain()
                 continue
             elif cmd == proto.CMD_PONG: # 以后处理
+                log.debug('cmd pong:%s', data)
                 continue
             elif cmd == proto.CMD_CLOSE:
                 log.info('cmd close client %d', name)

@@ -14,11 +14,10 @@ import logging
 
 # 所有的连接
 name_conns = {}
-
 timeout = 30
 
 async def from_local(name, serv_w):
-    log.debug('read client %d ...', name)
+    log.debug('read local %d ...', name)
     global name_conns
     loc_r, loc_w = name_conns[name]
     while True:
@@ -27,7 +26,7 @@ async def from_local(name, serv_w):
         except:
             log.info(traceback.format_exc())
             data = ''
-        log.debug('c >>> %d', len(data))
+        log.debug('c >>> %d %s', len(data), data)
         if not data:
             log.info('read 0, conn %d close, quit', name)
             #loc_w.write_eof()
@@ -52,13 +51,31 @@ async def server_to_local(serv_r, serv_w, local_addr):
     loc_r = None
     loc_w = None
 
+    # ping记录
+    pings = []
+
     localip, localport = local_addr
     log.debug('read from server ...')
     while True:
         try:
             head = await asyncio.wait_for(serv_r.readexactly(proto.headlen), timeout=timeout)
         except asyncio.TimeoutError:
-            log.debug('read server timeout, continue')
+            #log.debug('read server timeout, continue')
+            tm = str(time.time())
+            #log.debug('ping time:%s', tm)
+            pings.append(tm)
+            pkdata = proto.cmd_ping(data=tm)
+            log.debug('s <<< cmd_ping %d', len(pkdata))
+            try:
+                serv_w.write(pkdata)
+                await serv_w.drain()
+            except:
+                log.debug('send data to server error, quit')
+                log.debug(traceback.format_exc())
+                serv_w.close()
+                await serv_w.wait_closed()
+                return
+ 
             continue
         except exceptions.IncompleteReadError:
             log.info('read server incomplete, thorn close, quit')
@@ -93,7 +110,26 @@ async def server_to_local(serv_r, serv_w, local_addr):
             await serv_w.wait_closed()
             return
 
-        #log.debug('s >>> %d', len(data))
+        if cmd == proto.CMD_PING:
+            pkdata = proto.cmd_pong(name, data)
+            serv_w.write(pkdata)
+            await serv_w.drain()
+            continue
+        elif cmd == proto.CMD_PONG:
+            #log.debug('pong data:%s', data)
+            now = time.time()
+            log.debug('latency:%f', now-float(data))
+            pongdata = data.decode('utf-8')
+            for i in range(0, len(pings)):
+                if pings[i] == pongdata:
+                    pings = pings[i+1:]
+                    break
+            else:
+                log.debug('not found ping data, contiue')
+
+            continue
+            
+        #log.debug('s >>> %d %s', len(data), data)
         loc_r, loc_w = None, None
         if name in name_conns:
             loc_r, loc_w = name_conns[name]
@@ -106,7 +142,7 @@ async def server_to_local(serv_r, serv_w, local_addr):
             t = asyncio.create_task(from_local(name, serv_w))
             #await t
 
-        #log.debug('c <<< %d ^', len(data))
+        log.debug('c <<< %d ^', len(data))
         loc_w.write(data)
         await loc_w.drain()
 

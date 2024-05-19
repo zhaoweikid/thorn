@@ -13,6 +13,8 @@ headlen = struct.calcsize(headtypes)
 
 def pack(name, cmd, data):
     # length(4B) + name(4B) + command(1B)
+    if isinstance(data, str):
+        data = data.encode('utf-8')
     return struct.pack(headtypes, len(data), int(name), cmd) + data
 
 def pack_head(name, cmd, datalen):
@@ -27,9 +29,10 @@ def auth(user, byte=False):
         return s.encode('utf-8')
     return s
 
-def cmd_ping(name):
-    data = '{}'.format(int(time.time()))
-    return pack_head(name, CMD_PING, data)
+def cmd_ping(name=4294967295, data=None):
+    if not data:
+        data = str(time.time())
+    return pack(name, CMD_PING, data)
 
 def cmd_pong(name, data):
     return pack(name, CMD_PONG, data)
