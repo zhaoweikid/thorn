@@ -15,7 +15,7 @@ import logging
 # 所有的连接
 name_conns = {}
 # 网络读超时
-timeout = 10
+timeout = 30
 
 async def do_close(w):
     try:
@@ -121,7 +121,7 @@ class Connection:
 
         return await do_write(self.w, pkdata)
 
-    async def _write(self, data):
+    async def write_data(self, data):
         if isinstance(data, str):
             data = data.encode('utf-8')
         return await do_write(self.w, data)
@@ -141,12 +141,12 @@ class Connection:
             name = self.name
         pkdata = proto.cmd_close(name)
         log.debug('s <<< cmd_close %d', len(pkdata))
-        return await self._write(pkdata)
+        return await self.write_data(pkdata)
 
     async def send_auth(self, user):
         s = proto.auth(user)
         log.debug('s <<< %s', s)
-        return await self._write(s)
+        return await self.write_data(s)
     
     async def send_ping(self):
         global timeout
@@ -164,11 +164,11 @@ class Connection:
         pkdata = proto.cmd_ping(data=tm)
         log.debug('s <<< cmd_ping %d', len(pkdata))
 
-        return await self._write(pkdata)
+        return await self.write_data(pkdata)
 
     async def send_pong(self, name, data):
         pkdata = proto.cmd_pong(name, data)
-        return await server._write(pkdata)
+        return await server.write_data(pkdata)
 
     def apply_pong(self, name, data):
         now = time.time()
@@ -193,14 +193,16 @@ async def local_to_server(c, server):
             log.info(traceback.format_exc())
             data = ''
         
-        log.debug('c >>> %d %s', len(data), data)
+        #log.debug('c >>> %d %s', len(data), data)
+        log.debug('c >>> %d', len(data))
         if not data:
             log.info('read 0, conn %d close, quit', c.name)
             await c.close()
 
             await server.send_close(c.name)
             return
-        
+       
+        log.debug('s <<< %d ^', len(data))
         if not await server.write(data, c.name):
             return
 
@@ -240,16 +242,17 @@ async def server_to_local(server, local_addr):
             continue
         
         #log.debug('s >>> %d %s', len(data), data)
+        log.debug('s >>> %d', len(data))
         c = name_conns.get(name, None)
         if not c or c.w.is_closing():
-            c = Connection(addr=localaddr, name=name)
+            c = Connection(addr=local_addr, name=name)
             await c.open()
             t = asyncio.create_task(local_to_server(c, server))
             c.task = t
             name_conns[name] = c
 
         log.debug('c <<< %d ^', len(data))
-        if not await c.write(data):
+        if not await c.write_data(data):
             return
 
 
