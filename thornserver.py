@@ -85,10 +85,16 @@ async def from_thorn(th_r, th_w, port):
         log.debug('wait data from thorn ...')
         while True:
             try:
+                start = time.time()
                 head = await asyncio.wait_for(th_r.readexactly(proto.headlen), timeout=60)
                 log.debug('thorn >>> %s', head)
             except asyncio.TimeoutError:
                 log.debug('thorn read timeout, continue')
+                if time.time() - start < 1:
+                    # 未知问题，快速超时了
+                    log.info('timeout too quickly, quit')
+                    await item.close()
+                    break
                 continue
 
             if not head:
@@ -259,8 +265,16 @@ async def server_msg(serv_reader, serv_writer):
             return
         log.debug('thorn >> %s', ln)
         if not ln:
-            log.debug('read null, close')
+            log.debug('thorn read null, close')
             return
+
+        if len(ln) >= 50:
+            log.debug('command too long, close')
+            return
+        if ln[:4] != b'AUTH':
+            log.debug('command not auth, close')
+            return
+
         cmd, arg = proto.unpack(ln)
         log.debug(f'cmd:{cmd} arg:{arg}')
         if cmd == b'AUTH':

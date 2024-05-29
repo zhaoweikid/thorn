@@ -47,14 +47,19 @@ class Connection:
     async def open(self):
         self.r = None
         self.w = None
-        try:
-            log.warning('connect to %s:%d', self.addr[0], self.addr[1])
-            self.r, self.w = await asyncio.open_connection(self.addr[0], self.addr[1])
-            log.debug('connected')
-            return True
-        except:
-            log.debug('connect error: %s', traceback.format_exc())
-            return False
+        tryn = 10
+
+        while tryn > 0:
+            try:
+                log.warning('connect to %s:%d', self.addr[0], self.addr[1])
+                self.r, self.w = await asyncio.open_connection(self.addr[0], self.addr[1])
+                log.debug('connected')
+                return True
+            except:
+                log.debug('connect error: %s, try %d', traceback.format_exc(), tryn)
+                await asyncio.sleep(3)
+                tryn -= 1
+        return False
 
     async def readline(self, timeout=30):
         try:
