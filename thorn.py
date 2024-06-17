@@ -160,7 +160,7 @@ class Connection:
 
         if self._pings:
             noreply = float(self._pings[0])
-            if now-noreplay > timeout*3: 
+            if now-noreply > timeout*3: 
                 log.debug('server maybe disconnect, quit')
                 self.close()
                 return False
