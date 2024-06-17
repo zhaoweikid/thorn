@@ -66,11 +66,11 @@ class Connection:
             ln = await asyncio.wait_for(self.r.readline(), timeout=timeout)
             if not ln:
                 log.info('readline 0, close')
-                self.close()
+                await self.close()
                 return ''
         except asyncio.TimeoutError:
             log.info('readline timeout, close')
-            self.close()
+            await self.close()
             return ''
         except:
             log.debug('readline error: %s', traceback.format_exc())
@@ -86,11 +86,11 @@ class Connection:
             return ln
         except asyncio.TimeoutError:
             log.info('readexactly timeout, close')
-            self.close()
+            await self.close()
             return ''
         except exceptions.IncompleteReadError:
             log.info('readexactly incomplete, close')
-            self.close()
+            await self.close()
             return ''
         except:
             log.debug('readexactly error: %s', traceback.format_exc())
@@ -109,7 +109,7 @@ class Connection:
             raise
         except exceptions.IncompleteReadError:
             log.info('readexactly incomplete, close')
-            self.close()
+            await self.close()
             return ''
         except:
             log.debug('readexactly error: %s', traceback.format_exc())
@@ -162,7 +162,7 @@ class Connection:
             noreply = float(self._pings[0])
             if now-noreply > timeout*3: 
                 log.debug('server maybe disconnect, quit')
-                self.close()
+                await self.close()
                 return False
         #log.debug('ping time:%s', tm)
         self._pings.append(tm)
