@@ -93,19 +93,17 @@ async def from_thorn(th_r, th_w, port):
                 if time.time() - start < 1:
                     # 未知问题，快速超时了
                     log.info('timeout too quickly, quit')
-                    await item.close()
                     break
                 continue
 
             if not head:
                 log.info('thorn read null, thorn close, quit')
-                await item.close()
                 break
+
             length, name, cmd = proto.unpack_head(head)
 
             if length < 0:
                 log.info('length error, thorn %d close, quit', name)
-                await item.close()
                 break
 
             if length > 0:
@@ -114,7 +112,6 @@ async def from_thorn(th_r, th_w, port):
                     log.debug('thorn >>> %d', len(data))
                 except asyncio.TimeoutError:
                     log.debug('thorn read body timeout, quit')
-                    await item.close()
                     break
             else:
                 data = ''
@@ -150,17 +147,21 @@ async def from_thorn(th_r, th_w, port):
                 cli_w.write(data)
                 await cli_w.drain()
             except:
+                log.info('client %s write error', name)
                 log.info(traceback.format_exc())
                 break
     except:
         log.debug(traceback.format_exc())
+    finally:
         await item.close()
-    try:
-        log.debug('serving: {}'.format(item.server.is_serving()))
-        item.thorn_task.cancel()
-    except:
-        log.debug(traceback.format_exc())
-    log.debug('from_thorn complete!!!')
+
+        try:
+            log.debug('serving: {}'.format(item.server.is_serving()))
+            item.thorn_task.cancel()
+        except:
+            log.debug(traceback.format_exc())
+
+    log.debug('%d from_thorn complete!!!', port)
 
 async def from_client(cli_r, cli_w, th_w, clisn, port):
     '''从client转发数据给thorn'''
@@ -168,28 +169,36 @@ async def from_client(cli_r, cli_w, th_w, clisn, port):
     global timeout, relay_map
 
     item = relay_map[port]
+    waitn = 3
 
     try:
         while True:
             try:
                 data = await asyncio.wait_for(cli_r.read(8192*2), timeout=timeout)
             except asyncio.TimeoutError:
-                log.debug('read client %d timeout, continue', clisn)
-                continue
+                waitn -= 1
+                if waitn > 0:
+                    log.debug('read client %d timeout, waitn:%d, continue', clisn, waitn)
+                    continue
+                else:
+                    log.debug('read client %d timeout, waitn:%d, close', clisn, waitn) 
+                    break
             
             log.debug('client %d >>> %d', clisn, len(data))        
             if not data:
                 log.info('read 0, client %d close, quit', clisn)
-                await item.close_client(clisn)
                 break
+            waitn = 3
             pkdata = proto.pack(clisn, proto.CMD_SEND, data)
             log.debug('thorn %d <<< %d', clisn, len(pkdata))
             th_w.write(pkdata)
             await th_w.drain()
     except:
         log.debug(traceback.format_exc())
+    finally:
+        await item.close_client(clisn)
 
-    log.debug('from_client complete!!!')
+    log.debug('from_client complete!!! %d', clisn)
 
 
 async def relay_msg(reader, writer):
@@ -207,17 +216,20 @@ async def relay_msg(reader, writer):
         item.clients[sn] = [reader, writer]
 
         log.info('new relay client:%s name:%d', peer, sn)
-        t = asyncio.create_task(from_client(reader, writer, th_w, sn, port))
-        await t
-            
-        log.debug('pop %d', sn)
-        try:
-            item.clients.pop(sn) 
-        except:
-            pass
+        await from_client(reader, writer, th_w, sn, port)
     except:
         log.debug(traceback.format_exc())
-    log.debug('relay_msg complete')
+    finally:
+        if not writer.is_closing():
+            log.debug('close writer')
+            writer.close()
+            await writer.wait_closed()
+
+        if sn in item.clients:
+            log.debug('pop %d', sn)
+            item.clients.pop(sn)
+
+    log.debug('%d relay_msg complete, close', sn)
 
 
 async def relay_server(cf, th_r, th_w):
@@ -225,8 +237,13 @@ async def relay_server(cf, th_r, th_w):
     port = cf['port']
 
     log.info('relay server start at {0}:{1}'.format(config.HOST[0], port)) 
-    relay_serv = await asyncio.start_server(relay_msg, 
-        config.HOST[0], port)
+    try:
+        relay_serv = await asyncio.start_server(relay_msg, 
+            config.HOST[0], port)
+    except:
+        log.info('server %s:%d start failed, quit', config.HOST[0], port)
+        log.debug(traceback.format_exc())
+        return
 
     ri = RelayInfo(th_r, th_w, relay_serv, port)
     relay_map[port] = ri
@@ -240,74 +257,86 @@ async def relay_server(cf, th_r, th_w):
             await relay_serv.serve_forever()
         except:
             log.debug(traceback.format_exc())
-    log.debug('relay_server closed')   
-    try:
-        relay_map.pop(port)
-    except:
-        log.debug(traceback.format_exc())
+        finally:
+            log.debug('%d relay_server closed', port)   
+            try:
+                if port in relay_map:
+                    relay_map.pop(port)
+            except:
+                log.debug(traceback.format_exc())
 
-    log.debug('relay_server complete!!!')
+    log.debug('%d relay_server complete!!!', port)
 
 async def server_msg(serv_reader, serv_writer):
     global relay_map
 
-    peer = serv_writer._transport._sock.getpeername()
-    log.debug('thorn from %s:%d', peer[0], peer[1])
+    try:
+        peer = serv_writer._transport._sock.getpeername()
+        log.debug('thorn from %s:%d', peer[0], peer[1])
 
-    timeout = 30
-    while True:
-        try:
-            ln = await asyncio.wait_for(serv_reader.readline(), timeout=timeout)
-        except asyncio.TimeoutError:
-            log.debug('thorn read timeout:%d, quit', timeout)
-            serv_writer.close()
-            await serv_writer.wait_closed()
-            return
-        log.debug('thorn >> %s', ln)
-        if not ln:
-            log.debug('thorn read null, close')
-            return
+        timeout = 30
 
-        if len(ln) >= 50:
-            log.debug('command too long, close')
-            return
-        if ln[:4] != b'AUTH':
-            log.debug('command not auth, close')
-            return
+        while True:
+            try:
+                ln = await asyncio.wait_for(serv_reader.readline(), timeout=timeout)
+            except asyncio.TimeoutError:
+                log.debug('thorn read timeout:%d, quit', timeout)
+                break
+            
+            log.debug('thorn >> %s', ln)
+            if not ln:
+                log.debug('thorn read null, close')
+                break
 
-        cmd, arg = proto.unpack(ln)
-        log.debug(f'cmd:{cmd} arg:{arg}')
-        if cmd == b'AUTH':
-            cf = config.CLIENT.get(arg.decode('utf-8'))
-            if not cf:
-                ret = proto.error('client error')
+            if len(ln) >= 50:
+                log.debug('command too long, close')
+                break
+
+            if ln[:4] != b'AUTH':
+                log.debug('command name error, close')
+                break
+
+            cmd, arg = proto.unpack(ln)
+            log.debug(f'cmd:{cmd} arg:{arg}')
+            if cmd == b'AUTH':
+                cf = config.CLIENT.get(arg.decode('utf-8'))
+                if not cf:
+                    ret = proto.error('client error')
+                    log.info(f'thorn << {ret}')
+                    serv_writer.write(ret.encode('utf-8'))
+                    await serv_writer.drain()
+                    continue
+           
+                item = relay_map.get(cf['port'])
+                if item: # 踢掉原来的连接
+                    log.debug('thorn exist, kick')
+                    await item.close()
+
+                ret = proto.ok()
                 log.info(f'thorn << {ret}')
                 serv_writer.write(ret.encode('utf-8'))
                 await serv_writer.drain()
-                continue
-       
-            item = relay_map.get(cf['port'])
-            if item: # 踢掉原来的连接
-                log.debug('thorn exist, kick')
-                await item.close()
+                
+                log.debug('relay_server ...')
+                # 进入转发的服务处理过程
+                await relay_server(cf, serv_reader, serv_writer)
+                log.debug('relay_server quit')
+                break
+            else:
+                ret = proto.error('command error')
+                log.info(f'thorn << {ret}')
+                serv_writer.write(ret.encode('utf-8'))
+                await serv_writer.drain()
+                
+                log.debug('command error, close')
+                break
+    except:
+        log.debug(traceback.format_exc())
+    finally:
+        serv_writer.close()
+        await serv_writer.wait_closed()
 
-            ret = proto.ok()
-            log.info(f'thorn << {ret}')
-            serv_writer.write(ret.encode('utf-8'))
-            await serv_writer.drain()
-            
-            log.debug('relay_server ...')
-            # 进入转发的服务处理过程
-            await relay_server(cf, serv_reader, serv_writer)
-            log.debug('relay_server quit')
-            break
-        else:
-            ret = proto.error('command error')
-            log.info(f'thorn << {ret}')
-            serv_writer.write(ret.encode('utf-8'))
-            await serv_writer.drain()
-    
-    log.debug('server_msg complete')
+    log.debug('%s:%d server_msg complete', peer[0], peer[1])
 
 async def server():
     serv = await asyncio.start_server(server_msg, 
