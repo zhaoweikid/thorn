@@ -13,8 +13,9 @@ import logging
 
 # port: {'stream':(reader, writer), 'no':1}
 relay_map = {}
-# 网络读超市时间,s
+# 网络读超时时间,s
 timeout = 30
+
 
 class RelayInfo (object):
     def __init__(self, thorn_r, thorn_w, server, port):
@@ -33,15 +34,23 @@ class RelayInfo (object):
         global relay_map
         try:
             log.debug('close relay server')
-            self.server.close()
-            await self.server.wait_closed()
+            if self.server:
+                self.server.close()
+                await self.server.wait_closed()
+                self.server = None
 
-            await self.close_allclient()
+            if self.clients:
+                await self.close_allclient()
           
             log.debug('close thorn')
-            self.thorn_r.feed_eof()
-            self.thorn_w.close()
-            await self.thorn_w.wait_closed()
+            if self.thorn_r:
+                self.thorn_r.feed_eof()
+
+            if self.thorn_w:
+                self.thorn_w.close()
+                await self.thorn_w.wait_closed()
+                self.thorn_r = None
+                self.thorn_w = None
             
             log.debug('all closed')
             try:
@@ -79,7 +88,10 @@ class RelayInfo (object):
 async def from_thorn(th_r, th_w, port):
     '''从thorn读取数据发送给client'''
     global relay_map, timeout
-    item = relay_map[port]
+    item = relay_map.get(port)
+    if not item:
+        log.warning('get relayinfo in relay_map error: %d', port)
+        return
     
     try:
         log.debug('wait data from thorn ...')
@@ -115,7 +127,7 @@ async def from_thorn(th_r, th_w, port):
                     break
             else:
                 data = ''
-                log.debug('thorn cmd %d not have data', cmd)
+                log.debug('thorn cmd %d no data', cmd)
 
             # ping只是用来在thorn和server之间保持连接
             if cmd == proto.CMD_PING:
@@ -161,14 +173,17 @@ async def from_thorn(th_r, th_w, port):
         except:
             log.debug(traceback.format_exc())
 
-    log.debug('%d from_thorn complete!!!', port)
+    log.debug('%d from_thorn return!!!', port)
 
 async def from_client(cli_r, cli_w, th_w, clisn, port):
     '''从client转发数据给thorn'''
     log.debug('wait data from client:%d ...', clisn)
     global timeout, relay_map
 
-    item = relay_map[port]
+    item = relay_map.get(port)
+    if not item:
+        log.warning('get relayinfo in relay_map error: %d', port)
+        return
     waitn = 3
 
     try:
@@ -198,7 +213,7 @@ async def from_client(cli_r, cli_w, th_w, clisn, port):
     finally:
         await item.close_client(clisn)
 
-    log.debug('from_client complete!!! %d', clisn)
+    log.debug('from_client return !!! %d', clisn)
 
 
 async def relay_msg(reader, writer):
@@ -261,11 +276,16 @@ async def relay_server(cf, th_r, th_w):
             log.debug('%d relay_server closed', port)   
             try:
                 if port in relay_map:
-                    relay_map.pop(port)
+                    try:
+                        x = relay_map.pop(port)
+                        x.close()
+                    except:
+                        log.info(traceback.format_exc())
             except:
                 log.debug(traceback.format_exc())
 
     log.debug('%d relay_server complete!!!', port)
+
 
 async def server_msg(serv_reader, serv_writer):
     global relay_map
